@@ -8,3 +8,4 @@ venv/
 outputs/*.csv
 !outputs/.gitkeep
 .DS_Store
+Initial_findings.md
