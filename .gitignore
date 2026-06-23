@@ -1,0 +1,10 @@
+data/candidates.jsonl
+data/*.jsonl.gz
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+outputs/*.csv
+!outputs/.gitkeep
+.DS_Store
