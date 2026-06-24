@@ -20,9 +20,13 @@ from constants import (
     FICTIONAL_FILLER_COMPANIES,
     IT_SERVICES_COMPANIES,
     REAL_PRODUCT_COMPANIES,
+    CV_SPEECH_TITLES,
+    OVERRIDE_PATTERNS,
+    JD_PREFERRED_CITIES,
+    AI_SKILL_NAMES,
 )
-
 from load_candidates import iter_candidates
+import re
 
 
 def title_distribution(path: str) -> collections.Counter:
@@ -36,6 +40,15 @@ def company_distribution(path: str) -> collections.Counter:
     companies = collections.Counter()
     for c in iter_candidates(path):
         companies[c["profile"]["current_company"]] += 1
+    return companies
+
+
+def company_distribution_by_location(path: str, city_substrings: set[str]) -> collections.Counter:
+    companies = collections.Counter()
+    for c in iter_candidates(path):
+        loc = (c["profile"].get("location") or "").lower()
+        if any(city in loc for city in city_substrings):
+            companies[c["profile"]["current_company"]] += 1
     return companies
 
 
@@ -90,11 +103,53 @@ def find_real_ml_fits(path: str, ai_titles: set[str], product_companies: set[str
     """Candidates with a genuine AI/ML title AND at a real product
     company (not IT services, not fictional filler). These are
     plausible high-tier candidates worth manually inspecting."""
+    # Precompile override regexes
+    override_regexes = [re.compile(pat, flags=re.IGNORECASE) for pat in OVERRIDE_PATTERNS]
+
+    def career_text(candidate: dict) -> str:
+        parts = []
+        for e in candidate.get("career_history", []):
+            parts.append(e.get("title", ""))
+            parts.append(e.get("description", ""))
+        return " ".join(parts).lower()
+
+    def matches_override(candidate: dict) -> bool:
+        txt = career_text(candidate)
+        return any(r.search(txt) for r in override_regexes)
+
+    def has_nlp_ir_exposure(candidate: dict) -> bool:
+        txt = career_text(candidate)
+        return any(k in txt for k in ("nlp", "retriev", "embedding", "search", "ranking", "recommendation", "ir", "information retriev"))
+
     fits = []
     for c in iter_candidates(path):
         title = c["profile"]["current_title"]
         company = c["profile"]["current_company"]
-        if title in ai_titles and company in product_companies:
+
+        # company must be a recognized product company
+        if company not in product_companies:
+            continue
+
+        ai_relevant = False
+        # Direct AI title
+        if title in ai_titles:
+            ai_relevant = True
+
+        # CV/speech titles need explicit NLP/IR exposure
+        if title in CV_SPEECH_TITLES:
+            if not has_nlp_ir_exposure(c):
+                ai_relevant = False
+
+        # Non-AI titles may be promoted via override patterns found in career history
+        if not ai_relevant and matches_override(c):
+            ai_relevant = True
+
+        # JD-preferred location filter: only consider preferred cities
+        loc = (c["profile"].get("location") or "").lower()
+        if not any(city in loc for city in JD_PREFERRED_CITIES):
+            continue
+
+        if ai_relevant:
             fits.append(
                 {
                     "candidate_id": c["candidate_id"],
@@ -104,14 +159,9 @@ def find_real_ml_fits(path: str, ai_titles: set[str], product_companies: set[str
                     "location": c["profile"]["location"],
                 }
             )
+
     return fits
 
-
-AI_SKILL_NAMES = {
-    "NLP", "Fine-tuning LLMs", "LoRA", "Speech Recognition", "Image Classification",
-    "GANs", "Prompt Engineering", "Haystack", "Kubeflow", "Weights & Biases",
-    "Milvus", "TTS", "BentoML", "Feature Engineering",
-}
 
 
 if __name__ == "__main__":
@@ -134,7 +184,9 @@ if __name__ == "__main__":
     print("2. COMPANY DISTRIBUTION (categorized)")
     print("=" * 70)
     companies = company_distribution(PATH)
-    real_product_total = sum(companies[c] for c in REAL_PRODUCT_COMPANIES if c in companies)
+    # Count product-company employees within JD-preferred locations
+    companies_in_pref = company_distribution_by_location(PATH, JD_PREFERRED_CITIES)
+    real_product_total = sum(companies_in_pref[c] for c in REAL_PRODUCT_COMPANIES if c in companies_in_pref)
     it_services_total = sum(companies[c] for c in IT_SERVICES_COMPANIES if c in companies)
     filler_total = sum(companies[c] for c in FICTIONAL_FILLER_COMPANIES if c in companies)
     print(f"  Real product companies (Swiggy, CRED, Razorpay, ...): {real_product_total:,}")
