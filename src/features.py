@@ -16,6 +16,7 @@ itself.
 
 from __future__ import annotations
 
+from datetime import date
 import re
 from dataclasses import dataclass
 
@@ -37,6 +38,68 @@ _OVERRIDE_RE = re.compile("|".join(OVERRIDE_PATTERNS), re.IGNORECASE)
 # distance from the band.
 JD_MIN_YEARS = 5.0
 JD_MAX_YEARS = 9.0
+DEFAULT_REFERENCE_DATE = date(2026, 5, 27)
+
+CORE_RETRIEVAL_SKILLS = {
+    "BM25",
+    "Content Matching",
+    "Elasticsearch",
+    "Embeddings",
+    "FAISS",
+    "Haystack",
+    "Information Retrieval",
+    "Information Retrieval Systems",
+    "Learning to Rank",
+    "LlamaIndex",
+    "Milvus",
+    "OpenSearch",
+    "Pinecone",
+    "Qdrant",
+    "RAG",
+    "Ranking Systems",
+    "Recommendation Systems",
+    "Search & Discovery",
+    "Search Backend",
+    "Search Infrastructure",
+    "Semantic Search",
+    "Sentence Transformers",
+    "Vector Search",
+    "Weaviate",
+    "pgvector",
+}
+
+SUPPORTING_AI_SKILLS = {
+    "BentoML",
+    "Deep Learning",
+    "Feature Engineering",
+    "Fine-tuning LLMs",
+    "Hugging Face Transformers",
+    "Kubeflow",
+    "LLMs",
+    "LoRA",
+    "Machine Learning",
+    "MLflow",
+    "MLOps",
+    "Natural Language Processing",
+    "NLP",
+    "PEFT",
+    "Prompt Engineering",
+    "PyTorch",
+    "Python",
+    "QLoRA",
+    "scikit-learn",
+    "TensorFlow",
+    "Text Encoders",
+    "Vector Representations",
+    "Weights & Biases",
+}
+
+PROFICIENCY_WEIGHT = {
+    "beginner": 0.25,
+    "intermediate": 0.55,
+    "advanced": 0.80,
+    "expert": 1.00,
+}
 
 
 @dataclass
@@ -161,6 +224,152 @@ def location_fit_score(candidate: dict) -> Evidence:
     if country == "India":
         return Evidence(0.4, f"based in {candidate['profile']['location']}, not willing to relocate")
     return Evidence(0.2, f"based outside India ({candidate['profile']['location']})")
+
+
+def _duration_weight(months: int) -> float:
+    if months <= 0:
+        return 0.0
+    if months < 6:
+        return 0.35
+    if months < 12:
+        return 0.55
+    if months < 24:
+        return 0.80
+    return 1.00
+
+
+def _endorsement_weight(endorsements: int) -> float:
+    return min(1.0, 0.70 + endorsements / 60.0)
+
+
+def skill_trust_score(candidate: dict) -> Evidence:
+    """Score JD-relevant skills using duration and endorsements.
+
+    Skill presence alone is deliberately not enough: zero-duration skills
+    contribute nothing, and the whole component is capped so keyword stuffers
+    cannot outrank candidates with real career-history evidence.
+    """
+    relevant = []
+    for skill in candidate.get("skills", []):
+        name = skill["name"]
+        if name in CORE_RETRIEVAL_SKILLS:
+            category_weight = 1.0
+        elif name in SUPPORTING_AI_SKILLS:
+            category_weight = 0.45
+        else:
+            continue
+
+        value = (
+            category_weight
+            * PROFICIENCY_WEIGHT.get(skill.get("proficiency"), 0.0)
+            * _duration_weight(skill.get("duration_months", 0))
+            * _endorsement_weight(skill.get("endorsements", 0))
+        )
+        if value > 0:
+            relevant.append((value, name, skill.get("duration_months", 0), skill.get("proficiency", "unknown")))
+
+    if not relevant:
+        return Evidence(0.0, "no trusted JD-relevant skills with nonzero duration")
+
+    relevant.sort(reverse=True)
+    score = min(1.0, sum(v for v, _, _, _ in relevant) / 4.5)
+    top = [
+        f"{name} ({prof}, {months}mo)"
+        for _, name, months, prof in relevant[:5]
+    ]
+    return Evidence(score, "trusted JD skills: " + ", ".join(top))
+
+
+def honeypot_flags(candidate: dict) -> list[str]:
+    """Return hard honeypot flags.
+
+    The clean signal in this dataset is multiple expert-level skills with
+    zero months of usage. Looser duration-vs-career checks were tested and
+    rejected because they falsely flag legitimate strong candidates.
+    """
+    zero_duration_experts = [
+        skill["name"]
+        for skill in candidate.get("skills", [])
+        if skill.get("proficiency") == "expert" and skill.get("duration_months", 0) == 0
+    ]
+    if len(zero_duration_experts) >= 2:
+        shown = ", ".join(zero_duration_experts[:6])
+        return [f"{len(zero_duration_experts)} expert skills with 0 months duration ({shown})"]
+    return []
+
+
+def _recency_score(days_since_active: int) -> float:
+    if days_since_active <= 7:
+        return 1.0
+    if days_since_active <= 30:
+        return 0.90
+    if days_since_active <= 90:
+        return 0.75
+    if days_since_active <= 180:
+        return 0.55
+    return 0.35
+
+
+def _rate_score(rate: float, low: float = 0.15, good: float = 0.75) -> float:
+    if rate >= good:
+        return 1.0
+    if rate <= low:
+        return 0.25
+    return 0.25 + 0.75 * ((rate - low) / (good - low))
+
+
+def _notice_score(days: int) -> float:
+    if days <= 30:
+        return 1.0
+    if days <= 60:
+        return 0.85
+    if days <= 90:
+        return 0.65
+    if days <= 120:
+        return 0.50
+    return 0.35
+
+
+def behavioral_availability_multiplier(candidate: dict, reference_date: date | None = None) -> Evidence:
+    """Return a multiplicative availability modifier.
+
+    The JD says behavioral signals should down-weight unavailable candidates,
+    not replace technical fit. We therefore convert behavior into a 0.50-1.00
+    multiplier and apply it after the base fit score.
+    """
+    reference_date = reference_date or DEFAULT_REFERENCE_DATE
+    signals = candidate["redrob_signals"]
+    last_active = date.fromisoformat(signals["last_active_date"])
+    days_since_active = max(0, (reference_date - last_active).days)
+
+    recency = _recency_score(days_since_active)
+    response = _rate_score(float(signals["recruiter_response_rate"]))
+    interview = _rate_score(float(signals["interview_completion_rate"]), low=0.30, good=0.90)
+    open_to_work = 1.0 if signals["open_to_work_flag"] else 0.65
+    notice = _notice_score(int(signals["notice_period_days"]))
+    verified = sum(
+        bool(signals.get(k))
+        for k in ("verified_email", "verified_phone", "linkedin_connected")
+    ) / 3.0
+
+    availability = (
+        0.25 * recency
+        + 0.25 * response
+        + 0.20 * interview
+        + 0.15 * open_to_work
+        + 0.10 * notice
+        + 0.05 * verified
+    )
+    multiplier = 0.50 + 0.50 * availability
+
+    status = "open to work" if signals["open_to_work_flag"] else "not marked open to work"
+    fact = (
+        f"availability {multiplier:.2f}x: active {days_since_active}d ago, "
+        f"response {signals['recruiter_response_rate']:.2f}, "
+        f"interview completion {signals['interview_completion_rate']:.2f}, "
+        f"{status}, notice {signals['notice_period_days']}d"
+    )
+    return Evidence(multiplier, fact)
 
 
 if __name__ == "__main__":

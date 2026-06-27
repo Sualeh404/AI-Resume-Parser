@@ -16,18 +16,34 @@ and keeps every downstream feature traceable back to the source record.
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 from typing import Iterator
 
-import pandas as pd
-
 
 def iter_candidates(path: str | Path) -> Iterator[dict]:
-    """Yield one parsed candidate dict per line. Streaming — does not
-    load the whole file into memory at once."""
+    """Yield one parsed candidate dict at a time.
+
+    Supports the released full pool as JSONL/JSONL.GZ and the bundled
+    sample_candidates.json file as a small JSON array. The full JSONL path
+    stays streaming; the JSON-array path is intended for small sandbox/demo
+    inputs only.
+    """
     path = Path(path)
-    with open(path, "r", encoding="utf-8") as f:
+    suffixes = [s.lower() for s in path.suffixes]
+
+    if suffixes[-1:] == [".json"]:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = data.get("candidates", [])
+        for candidate in data:
+            yield candidate
+        return
+
+    opener = gzip.open if suffixes[-2:] == [".jsonl", ".gz"] else open
+    with opener(path, "rt", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -40,6 +56,8 @@ def load_candidates_df(path: str | Path) -> pd.DataFrame:
     for filtering/sorting, and the full raw dict in the `raw` column for
     feature extraction.
     """
+    import pandas as pd
+
     rows = []
     for c in iter_candidates(path):
         profile = c["profile"]
