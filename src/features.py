@@ -1,24 +1,16 @@
 """
 features.py
 
-Feature extraction functions, one concern per function, each one
-traceable back to a specific fact in the candidate record. This is
-what makes the reasoning-generation step honest later: every score
-component has a corresponding human-readable fact already computed
-here, so reasoning.py never has to invent justification separately
-from what actually drove the score.
-
-Each function takes a raw candidate dict (the `raw` column from
-load_candidates.load_candidates_df) and returns either a score or a
-small dict of (score, evidence_string) so downstream code can explain
-itself.
+One function per scoring dimension, each returning a score and the
+specific fact that produced it. reasoning.py pulls these facts directly,
+so the reasoning text always reflects what actually drove the score.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 import re
-from dataclasses import dataclass
 
 from constants import (
     AI_TITLES,
@@ -32,65 +24,28 @@ from constants import (
 
 _OVERRIDE_RE = re.compile("|".join(OVERRIDE_PATTERNS), re.IGNORECASE)
 
-# JD target experience band: 5-9 years. Candidates outside this band
-# aren't auto-disqualified (a 4.5-year candidate with a perfect
-# profile is still worth a look) but get a penalty that grows with
-# distance from the band.
+# JD target band: 5–9 years.
 JD_MIN_YEARS = 5.0
 JD_MAX_YEARS = 9.0
+
 DEFAULT_REFERENCE_DATE = date(2026, 5, 27)
 
 CORE_RETRIEVAL_SKILLS = {
-    "BM25",
-    "Content Matching",
-    "Elasticsearch",
-    "Embeddings",
-    "FAISS",
-    "Haystack",
-    "Information Retrieval",
-    "Information Retrieval Systems",
-    "Learning to Rank",
-    "LlamaIndex",
-    "Milvus",
-    "OpenSearch",
-    "Pinecone",
-    "Qdrant",
-    "RAG",
-    "Ranking Systems",
-    "Recommendation Systems",
-    "Search & Discovery",
-    "Search Backend",
-    "Search Infrastructure",
-    "Semantic Search",
-    "Sentence Transformers",
-    "Vector Search",
-    "Weaviate",
-    "pgvector",
+    "BM25", "Content Matching", "Elasticsearch", "Embeddings", "FAISS",
+    "Haystack", "Information Retrieval", "Information Retrieval Systems",
+    "Learning to Rank", "LlamaIndex", "Milvus", "OpenSearch", "Pinecone",
+    "Qdrant", "RAG", "Ranking Systems", "Recommendation Systems",
+    "Search & Discovery", "Search Backend", "Search Infrastructure",
+    "Semantic Search", "Sentence Transformers", "Vector Search",
+    "Weaviate", "pgvector",
 }
 
 SUPPORTING_AI_SKILLS = {
-    "BentoML",
-    "Deep Learning",
-    "Feature Engineering",
-    "Fine-tuning LLMs",
-    "Hugging Face Transformers",
-    "Kubeflow",
-    "LLMs",
-    "LoRA",
-    "Machine Learning",
-    "MLflow",
-    "MLOps",
-    "Natural Language Processing",
-    "NLP",
-    "PEFT",
-    "Prompt Engineering",
-    "PyTorch",
-    "Python",
-    "QLoRA",
-    "scikit-learn",
-    "TensorFlow",
-    "Text Encoders",
-    "Vector Representations",
+    "BentoML", "Deep Learning", "Feature Engineering", "Fine-tuning LLMs",
+    "Hugging Face Transformers", "Kubeflow", "LLMs", "LoRA",
+    "Machine Learning", "MLflow", "MLOps", "Natural Language Processing",
+    "NLP", "PEFT", "Prompt Engineering", "PyTorch", "Python", "QLoRA",
+    "scikit-learn", "TensorFlow", "Text Encoders", "Vector Representations",
     "Weights & Biases",
 }
 
@@ -104,67 +59,49 @@ PROFICIENCY_WEIGHT = {
 
 @dataclass
 class Evidence:
-    """A score paired with the human-readable fact that produced it.
-    Used directly by reasoning.py so generated reasoning text can never
-    drift from what actually drove the ranking."""
-
+    """Score + the human-readable fact that produced it."""
     score: float
     fact: str
 
 
 def compute_real_experience_years(candidate: dict) -> float:
-    """Sum career_history durations rather than trusting
-    profile.years_of_experience, which is unreliable for ~0.05% of
-    candidates (concentrated in the AI-titled pool — see constants.py).
+    """Sum career_history durations instead of trusting the profile field.
+
+    profile.years_of_experience is wrong for ~48 candidates in the full pool
+    (12 of them in the AI-titled pool, roughly 20x over-represented).
+    The JD explicitly warns about this — a headline number can be inflated.
     """
     months = sum(ch["duration_months"] for ch in candidate["career_history"])
     return round(months / 12, 1)
 
 
 def experience_field_is_suspect(candidate: dict, tolerance_years: float = 2.0) -> bool:
-    """True if profile.years_of_experience disagrees with the summed
-    career history by more than `tolerance_years`. This is itself a
-    useful signal: a large, unexplained mismatch is either a data
-    error or a candidate's self-reported number inflating their
-    seniority — either way, the computed value should be trusted over
-    the self-reported one, and the mismatch is worth noting in the
-    candidate's reasoning text as a transparency point.
-    """
-    profile_yoe = candidate["profile"]["years_of_experience"]
-    real_yoe = compute_real_experience_years(candidate)
-    return abs(profile_yoe - real_yoe) > tolerance_years
+    """True if the profile's stated years disagree with the career history by more than 2 years."""
+    return abs(candidate["profile"]["years_of_experience"] - compute_real_experience_years(candidate)) > tolerance_years
 
 
 def experience_band_fit(real_years: float) -> Evidence:
-    """Score how well real (career-history-derived) experience fits
-    the JD's stated 5-9 year band. 1.0 inside the band, decaying
-    linearly outside it. Capped at 0 beyond a 6-year miss in either
-    direction (e.g. a 16-year veteran is not a junior-disguised-as-
-    senior fit for this role, regardless of skill quality)."""
+    """Score fit against the JD's 5–9 year band.
+
+    1.0 inside the band, linear decay outside it. A 16-year veteran isn't
+    wrong — just probably overqualified for what the role needs.
+    """
     if JD_MIN_YEARS <= real_years <= JD_MAX_YEARS:
         return Evidence(1.0, f"{real_years:.1f} yrs experience, within target 5-9yr band")
     if real_years < JD_MIN_YEARS:
         gap = JD_MIN_YEARS - real_years
-        score = max(0.0, 1.0 - gap / 3.0)  # full penalty by 2yr under
-        return Evidence(score, f"{real_years:.1f} yrs experience, {gap:.1f}yrs below target band")
+        return Evidence(max(0.0, 1.0 - gap / 3.0), f"{real_years:.1f} yrs experience, {gap:.1f}yrs below target band")
     gap = real_years - JD_MAX_YEARS
-    score = max(0.0, 1.0 - gap / 6.0)  # gentler decay above the band
-    return Evidence(score, f"{real_years:.1f} yrs experience, {gap:.1f}yrs above target band")
+    return Evidence(max(0.0, 1.0 - gap / 6.0), f"{real_years:.1f} yrs experience, {gap:.1f}yrs above target band")
 
 
 def title_tier_score(candidate: dict) -> Evidence:
-    """Title-based eligibility gate. Returns 0.0 for titles outside
-    the AI-relevant pool UNLESS the override pattern fires on career
-    history (see constants.OVERRIDE_PATTERNS — as of this dataset,
-    zero non-AI-titled candidates trigger this, but the mechanism
-    stays since the JD explicitly asks for this kind of reasoning).
+    """Title-based eligibility gate.
 
-    Within the AI-relevant pool, CV_SPEECH_TITLES get a moderate
-    penalty per the JD's explicit note that pure computer-vision/
-    speech/robotics background without NLP/IR exposure means
-    "re-learning fundamentals" for this role — that penalty is
-    overridden if their career history shows real NLP/IR/retrieval
-    work (checked separately in career_narrative_score).
+    AI-titled candidates pass. CV/speech titles get a partial penalty because
+    the JD specifically calls out that background as risky for a search/retrieval
+    role. Non-AI titles can still pass if the override pattern fires on career
+    history text — but as of the current dataset, that never happens.
     """
     title = candidate["profile"]["current_title"]
 
@@ -173,51 +110,44 @@ def title_tier_score(candidate: dict) -> Evidence:
             return Evidence(0.6, f"title '{title}' is AI-relevant but CV-focused; JD prefers NLP/IR background")
         return Evidence(1.0, f"title '{title}' is directly AI/ML-relevant")
 
-    # Override path: non-AI title, check career history for strong
-    # production ranking/retrieval ownership language.
     full_text = " ".join(ch["description"] for ch in candidate["career_history"])
     if _OVERRIDE_RE.search(full_text):
         return Evidence(0.7, f"title '{title}' is not AI-labeled, but career history shows direct ranking/retrieval ownership")
 
-    return Evidence(0.0, f"title '{title}' is not AI/ML-relevant and career history shows no override signal")
+    return Evidence(0.0, f"title '{title}' is not AI/ML-relevant")
 
 
 def company_type_score(candidate: dict) -> Evidence:
-    """Score current + prior employers against the JD's explicit
-    preference for product-company experience over pure IT-services /
-    consulting. A candidate currently at an IT-services firm is NOT
-    auto-penalized if their career history includes prior product-
-    company experience — the JD states this explicitly.
+    """Score based on product vs. IT-services vs. filler company history.
+
+    A candidate currently at TCS isn't penalized if they also worked at Swiggy —
+    the JD explicitly says prior product experience is fine.
     """
-    current_company = candidate["profile"]["current_company"]
-    all_companies = {current_company} | {ch["company"] for ch in candidate["career_history"]}
+    current = candidate["profile"]["current_company"]
+    all_companies = {current} | {ch["company"] for ch in candidate["career_history"]}
 
-    has_product_company = bool(all_companies & REAL_PRODUCT_COMPANIES)
-    has_only_it_services = bool(all_companies & IT_SERVICES_COMPANIES) and not has_product_company
-    is_filler_only = all_companies <= FICTIONAL_FILLER_COMPANIES
+    has_product = bool(all_companies & REAL_PRODUCT_COMPANIES)
+    has_only_services = bool(all_companies & IT_SERVICES_COMPANIES) and not has_product
+    filler_only = all_companies <= FICTIONAL_FILLER_COMPANIES
 
-    if has_product_company:
+    if has_product:
         matched = sorted(all_companies & REAL_PRODUCT_COMPANIES)
         return Evidence(1.0, f"has product-company experience ({', '.join(matched)})")
-    if has_only_it_services:
+    if has_only_services:
         matched = sorted(all_companies & IT_SERVICES_COMPANIES)
-        return Evidence(0.3, f"only IT-services/consulting experience ({', '.join(matched)}), no product-company background")
-    if is_filler_only:
+        return Evidence(0.3, f"only IT-services experience ({', '.join(matched)}), no product-company background")
+    if filler_only:
         return Evidence(0.5, "no recognizable product-company or IT-services experience on record")
-    return Evidence(0.6, f"current company '{current_company}' is a smaller/unlisted firm, no major product-company experience found")
+    return Evidence(0.6, f"current company '{current}' is a smaller/unlisted firm")
 
 
 def location_fit_score(candidate: dict) -> Evidence:
-    """Score based on JD-preferred cities, with a fallback for
-    candidates elsewhere in India who are explicitly willing to
-    relocate."""
+    """Score based on JD-preferred cities, with partial credit for relocation willingness."""
     location = candidate["profile"]["location"].lower()
     country = candidate["profile"]["country"]
     willing = candidate["redrob_signals"]["willing_to_relocate"]
 
-    in_preferred_city = any(city in location for city in JD_PREFERRED_CITIES)
-
-    if in_preferred_city:
+    if any(city in location for city in JD_PREFERRED_CITIES):
         return Evidence(1.0, f"based in {candidate['profile']['location']}, a preferred location")
     if country == "India" and willing:
         return Evidence(0.7, f"based in {candidate['profile']['location']}, elsewhere in India, willing to relocate")
@@ -243,11 +173,11 @@ def _endorsement_weight(endorsements: int) -> float:
 
 
 def skill_trust_score(candidate: dict) -> Evidence:
-    """Score JD-relevant skills using duration and endorsements.
+    """Score JD-relevant skills by proficiency, duration, and endorsements.
 
-    Skill presence alone is deliberately not enough: zero-duration skills
-    contribute nothing, and the whole component is capped so keyword stuffers
-    cannot outrank candidates with real career-history evidence.
+    Skill presence alone means nothing here — zero-duration skills score zero.
+    The component is also capped so a great skills section can't substitute for
+    weak career history.
     """
     relevant = []
     for skill in candidate.get("skills", []):
@@ -273,24 +203,22 @@ def skill_trust_score(candidate: dict) -> Evidence:
 
     relevant.sort(reverse=True)
     score = min(1.0, sum(v for v, _, _, _ in relevant) / 4.5)
-    top = [
-        f"{name} ({prof}, {months}mo)"
-        for _, name, months, prof in relevant[:5]
-    ]
+    top = [f"{name} ({prof}, {months}mo)" for _, name, months, prof in relevant[:5]]
     return Evidence(score, "trusted JD skills: " + ", ".join(top))
 
 
 def honeypot_flags(candidate: dict) -> list[str]:
-    """Return hard honeypot flags.
+    """Check for the honeypot pattern: expert-level skills with zero months of use.
 
-    The clean signal in this dataset is multiple expert-level skills with
-    zero months of usage. Looser duration-vs-career checks were tested and
-    rejected because they falsely flag legitimate strong candidates.
+    21 candidates in the full pool match this. All of them sit outside the
+    AI-titled pool — the title filter already screens them out before this runs.
+    Kept as a hard exclude rather than a penalty because zero-duration expert
+    claims aren't a matter of degree; they're a fabrication signal.
     """
     zero_duration_experts = [
-        skill["name"]
-        for skill in candidate.get("skills", [])
-        if skill.get("proficiency") == "expert" and skill.get("duration_months", 0) == 0
+        s["name"]
+        for s in candidate.get("skills", [])
+        if s.get("proficiency") == "expert" and s.get("duration_months", 0) == 0
     ]
     if len(zero_duration_experts) >= 2:
         shown = ", ".join(zero_duration_experts[:6])
@@ -331,26 +259,23 @@ def _notice_score(days: int) -> float:
 
 
 def behavioral_availability_multiplier(candidate: dict, reference_date: date | None = None) -> Evidence:
-    """Return a multiplicative availability modifier.
+    """Return a 0.50–1.00x multiplier based on how reachable the candidate is.
 
-    The JD says behavioral signals should down-weight unavailable candidates,
-    not replace technical fit. We therefore convert behavior into a 0.50-1.00
-    multiplier and apply it after the base fit score.
+    The JD says to down-weight unavailable candidates, not disqualify them.
+    Five candidates in the pool have perfect career scores but haven't been
+    active in months and barely respond to recruiters — without this multiplier
+    they'd dominate the top of the ranking despite being unreachable.
     """
     reference_date = reference_date or DEFAULT_REFERENCE_DATE
     signals = candidate["redrob_signals"]
-    last_active = date.fromisoformat(signals["last_active_date"])
-    days_since_active = max(0, (reference_date - last_active).days)
+    days_since_active = max(0, (reference_date - date.fromisoformat(signals["last_active_date"])).days)
 
     recency = _recency_score(days_since_active)
     response = _rate_score(float(signals["recruiter_response_rate"]))
     interview = _rate_score(float(signals["interview_completion_rate"]), low=0.30, good=0.90)
     open_to_work = 1.0 if signals["open_to_work_flag"] else 0.65
     notice = _notice_score(int(signals["notice_period_days"]))
-    verified = sum(
-        bool(signals.get(k))
-        for k in ("verified_email", "verified_phone", "linkedin_connected")
-    ) / 3.0
+    verified = sum(bool(signals.get(k)) for k in ("verified_email", "verified_phone", "linkedin_connected")) / 3.0
 
     availability = (
         0.25 * recency
@@ -366,32 +291,22 @@ def behavioral_availability_multiplier(candidate: dict, reference_date: date | N
     fact = (
         f"availability {multiplier:.2f}x: active {days_since_active}d ago, "
         f"response {signals['recruiter_response_rate']:.2f}, "
-        f"interview completion {signals['interview_completion_rate']:.2f}, "
+        f"interview {signals['interview_completion_rate']:.2f}, "
         f"{status}, notice {signals['notice_period_days']}d"
     )
     return Evidence(multiplier, fact)
 
 
 if __name__ == "__main__":
-    # Smoke test against the two reference candidates we found by hand:
-    # CAND_0091534 (the years_of_experience trap: field says 16.6,
-    # real career history says 7.1) and CAND_0000031 (the clean
-    # Swiggy recommendation-systems fit).
+    # Quick smoke test on a couple of known candidates
     from load_candidates import iter_candidates
 
-    targets = {"CAND_0091534", "CAND_0000031", "CAND_0001056"}
+    targets = {"CAND_0091534", "CAND_0000031"}
     for c in iter_candidates("data/candidates.jsonl"):
         if c["candidate_id"] not in targets:
             continue
         print(f"\n=== {c['candidate_id']} ({c['profile']['current_title']} @ {c['profile']['current_company']}) ===")
-        print(f"  profile.years_of_experience = {c['profile']['years_of_experience']}")
-        print(f"  real (career-history-derived) years = {compute_real_experience_years(c)}")
-        print(f"  experience_field_is_suspect = {experience_field_is_suspect(c)}")
-        eb = experience_band_fit(compute_real_experience_years(c))
-        print(f"  experience_band_fit = {eb.score:.2f}  ({eb.fact})")
-        tt = title_tier_score(c)
-        print(f"  title_tier_score = {tt.score:.2f}  ({tt.fact})")
-        ct = company_type_score(c)
-        print(f"  company_type_score = {ct.score:.2f}  ({ct.fact})")
-        lf = location_fit_score(c)
-        print(f"  location_fit_score = {lf.score:.2f}  ({lf.fact})")
+        real = compute_real_experience_years(c)
+        print(f"  profile yoe={c['profile']['years_of_experience']}  real={real}  suspect={experience_field_is_suspect(c)}")
+        for fn in (experience_band_fit(real), title_tier_score(c), company_type_score(c), location_fit_score(c)):
+            print(f"  {fn.score:.2f}  {fn.fact}")

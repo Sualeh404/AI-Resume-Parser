@@ -3,10 +3,13 @@ data/*.jsonl.gz
 __pycache__/
 *.pyc
 .pytest_cache/
-.claude/
 venv/
 .venv/
+*.egg-info/
+build/
+dist/
 outputs/*.csv
 !outputs/.gitkeep
 .DS_Store
+Thumbs.db
 Initial_findings.md

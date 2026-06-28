@@ -33,10 +33,10 @@ def test_honeypot_flags_zero_duration_experts():
 def test_rank_candidates_sample_sorted_and_reasoned():
     ranked = rank_candidates(ROOT / "data" / "sample_candidates.json", limit=5)
     assert len(ranked) == 5
-    assert ranked == sorted(ranked, key=lambda item: (-item.rank_score, item.candidate_id))
+    assert ranked == sorted(ranked, key=lambda s: (-s.rank_score, s.candidate_id))
 
     for idx, score in enumerate(ranked, start=1):
         reasoning = generate_reasoning(score, idx)
         assert score.candidate_id.startswith("CAND_")
-        assert reasoning
         assert score.title in reasoning
+        assert reasoning

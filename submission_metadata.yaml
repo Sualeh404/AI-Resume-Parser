@@ -1,0 +1,52 @@
+# Redrob Hackathon - Submission Metadata
+
+team_name: "Dungeon"
+
+primary_contact:
+  name: "Mohd Umar Farooq"
+  email: "reach.mdumar@gmail.com"
+  phone: "+91-9990799515"
+
+team_members:
+  - name: "Sualeh Rauf Khan"
+    email: "sualehraufrr@gmail.com"
+    role: "Python Developer"
+
+github_repo: "https://github.com/Umar-fr/AI-Resume-Parser"
+sandbox_link: "TODO"
+reproduce_command: "python rank.py --candidates data/candidates.jsonl --out outputs/submission.csv"
+
+compute:
+  platform: "Local Windows machine"
+  cpu_cores: 8
+  ram_gb: 8
+  python_version: "3.12.13"
+  os: "Windows"
+  uses_gpu_for_inference: false
+  has_network_during_ranking: false
+  pre_computation_required: false
+  pre_computation_time_minutes: 0
+
+ai_tools_used:
+  - "Claude"
+  - "ChatGPT"
+
+ai_usage_summary: |
+  AI tools were used for architecture discussion, code implementation support,
+  documentation, and review. The ranking step is deterministic Python code and
+  does not call any AI service or external API.
+
+methodology_summary: |
+  Deterministic evidence-based ranker for the Redrob Senior AI Engineer JD. The
+  base score combines career-history template tiers, AI/ML title fit, real
+  experience computed from career durations, product-company exposure, trusted
+  JD-relevant skills, and location fit. Behavioral availability signals are
+  applied afterward as a multiplier. Strict honeypot signatures are excluded.
+  Reasoning strings are generated from the same evidence used for scoring.
+
+declarations:
+  read_submission_spec: true
+  code_is_original_work: true
+  no_collusion: true
+  honeypot_check_done: true
+  reproduction_tested: true
